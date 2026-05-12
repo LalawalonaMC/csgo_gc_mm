@@ -49,7 +49,6 @@ endif()
 
 add_subdirectory(csgo_gc)
 add_subdirectory(launcher)
-add_subdirectory(steamworks)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
