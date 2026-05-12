@@ -5,10 +5,12 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
     strategy:
+      fail-fast: false # Prevents one OS failure from canceling others
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         build_type: [Release]
@@ -20,6 +22,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Install Ninja & CMake
       uses: lukka/get-cmake@latest
@@ -38,59 +42,52 @@ jobs:
     - if: matrix.os == 'ubuntu-latest'
       name: Build Linux
       run: |
-        mkdir -p ${{ github.workspace }}/release
-        cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DOUTDIR=${{ github.workspace }}/release
+        mkdir -p release
+        # Build main plugin
+        cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DOUTDIR=$GITHUB_WORKSPACE/release .
         cmake --build build --target csgo csgo_gc
-        cmake -G Ninja -B build_ds -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DOUTDIR=${{ github.workspace }}/release
+        # Build DS
+        cmake -G Ninja -B build_ds -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DOUTDIR=$GITHUB_WORKSPACE/release .
         cmake --build build_ds --target srcds csgo_gc
 
     - if: matrix.os == 'macos-latest'
       name: Build macOS
       run: |
-        mkdir -p ${{ github.workspace }}/release
-        cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_OSX_ARCHITECTURES=x86_64 -DFUNCHOOK_CPU=x86 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DOUTDIR=${{ github.workspace }}/release
+        mkdir -p release
+        cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DCMAKE_OSX_ARCHITECTURES=x86_64 -DFUNCHOOK_CPU=x86 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DOUTDIR=$GITHUB_WORKSPACE/release .
         cmake --build build --target csgo csgo_gc
 
     - if: matrix.os == 'windows-latest'
       name: Build Windows
       shell: pwsh
       run: |
-        New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/release"
-        cmake -A Win32 -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DOUTDIR="${{ github.workspace }}/release"
+        New-Item -ItemType Directory -Force -Path "release"
+        cmake -A Win32 -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DOUTDIR="$env:GITHUB_WORKSPACE/release" .
         cmake --build build --config ${{ matrix.build_type }} --target csgo srcds csgo_gc
 
     - name: Package
       shell: bash
       run: |
-        # Create directories
-        mkdir -p $GITHUB_WORKSPACE/release/licenses
-        mkdir -p $GITHUB_WORKSPACE/release/csgo_gc
-        
-        # Copy base files
-        cp $GITHUB_WORKSPACE/README.md $GITHUB_WORKSPACE/release/ || true
-        cp $GITHUB_WORKSPACE/LICENSE $GITHUB_WORKSPACE/release/licenses/LICENSE-csgo_gc.txt || true
-        
-        # Use find to locate licenses in case folder names vary (e.g. _deps variations)
-        find build/_deps -name "License.txt" -path "*cryptopp*" -exec cp {} $GITHUB_WORKSPACE/release/licenses/LICENSE-crypto++.txt \; || true
-        find build/_deps -name "COPYING" -path "*distorm*" -exec cp {} $GITHUB_WORKSPACE/release/licenses/LICENSE-distorm.txt \; || true
-        find build/_deps -name "LICENSE" -path "*funchook*" -exec cp {} $GITHUB_WORKSPACE/release/licenses/LICENSE-funchook.txt \; || true
-        find build/_deps -name "LICENSE" -path "*protobuf*" -exec cp {} $GITHUB_WORKSPACE/release/licenses/LICENSE-protobuf.txt \; || true
-        
-        # Examples
-        cp $GITHUB_WORKSPACE/examples/*.txt $GITHUB_WORKSPACE/release/csgo_gc/ || true
+        mkdir -p release/licenses
+        cp README.md release/ || true
+        cp LICENSE release/licenses/LICENSE-csgo_gc.txt || true
+        # Find potential licenses in build deps
+        find build/_deps -name "License.txt" -path "*cryptopp*" -exec cp {} release/licenses/LICENSE-crypto++.txt \; || true
+        find build/_deps -name "COPYING" -path "*distorm*" -exec cp {} release/licenses/LICENSE-distorm.txt \; || true
+        cp -r examples/*.txt release/csgo_gc/ || true
 
     - name: Zip artifacts
       shell: bash
       run: |
         OUTNAME="csgo_gc-${{ matrix.os }}.zip"
         cd release && zip -r "../$OUTNAME" .
-        echo "out_name=$OUTNAME" >> $GITHUB_ENV
+        echo "OUTNAME=$OUTNAME" >> $GITHUB_ENV
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: artifact-${{ matrix.os }}
-        path: ${{ github.workspace }}/csgo_gc-${{ matrix.os }}.zip
+        path: csgo_gc-${{ matrix.os }}.zip
 
   publish:
     if: github.event_name != 'pull_request'
@@ -109,19 +106,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="continuous"
-          # Find all zips regardless of subfolder structure from download-artifact
           files=$(find all_artifacts -type f -name "*.zip")
-          
           if [ -n "$files" ]; then
             gh release delete "$TAG" --cleanup-tag --yes || true
             sleep 5s 
-            gh release create "$TAG" \
-              --title "Continuous Build" \
-              --notes "Built from commit: ${{ github.sha }}" \
-              --target "${{ github.sha }}"
-            
+            gh release create "$TAG" --title "Continuous Build" --notes "SHA: ${{ github.sha }}" --target "main"
             gh release upload "$TAG" $files --clobber
-          else
-            echo "No zip files found to upload"
-            exit 1
           fi
